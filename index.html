@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>식단 기록 트래커</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-[#F0F6FC] text-[#1E293B]">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    const MEAL_TYPES = ["아침", "점심", "저녁", "간식"];
+    const MEAL_EMOJI = { 전체: "🍽️", 아침: "🥣", 점심: "🍱", 저녁: "🍚", 간식: "🍎" };
+
+    function getTodayStr(offset = 0) {
+      const d = new Date();
+      d.setDate(d.getDate() + offset);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    }
+
+    function formatDateLabel(dateStr) {
+      const [y, m, d] = dateStr.split("-").map(Number);
+      const dt = new Date(y, m - 1, d);
+      const days = ["일", "월", "화", "수", "목", "금", "토"];
+      return `${m}월 ${d}일 (${days[dt.getDay()]})`;
+    }
+
+    function DietApp() {
+      const [date, setDate] = useState(getTodayStr());
+      const [entries, setEntries] = useState([]);
+      const [input, setInput] = useState("");
+      const [mealChoice, setMealChoice] = useState("간식");
+      const [goal, setGoal] = useState(1800);
+      const [editingGoal, setEditingGoal] = useState(false);
+      const [goalDraft, setGoalDraft] = useState("1800");
+      const [viewMeal, setViewMeal] = useState("전체");
+      
+      const [apiKey, setApiKey] = useState("");
+      const [showKeyInput, setShowKeyInput] = useState(false);
+      const [loading, setLoading] = useState(false);
+      const [errorMsg, setErrorMsg] = useState("");
+
+      useEffect(() => {
+        try {
+          const savedGoal = localStorage.getItem("diet_goal");
+          if (savedGoal) {
+            setGoal(Number(savedGoal));
+            setGoalDraft(savedGoal);
+          }
+          const savedKey = localStorage.getItem("gemini_api_key");
+          if (savedKey) setApiKey(savedKey);
+        } catch (e) {}
+      }, []);
+
+      useEffect(() => {
+        try {
+          const data = localStorage.getItem(`diet_entry_${date}`);
+          setEntries(data ? JSON.parse(data) : []);
+        } catch (e) {
+          setEntries([]);
+        }
+      }, [date]);
+
+      const saveEntries = (next) => {
+        setEntries(next);
+        localStorage.setItem(`diet_entry_${date}`, JSON.stringify(next));
+      };
+
+      const handleGoalSave = () => {
+        const val = parseInt(goalDraft, 10);
+        if (val && val >= 500 && val <= 6000) {
+          setGoal(val);
+          localStorage.setItem("diet_goal", String(val));
+          setEditingGoal(false);
+        }
+      };
+
+      const handleKeySave = (key) => {
+        setApiKey(key);
+        localStorage.setItem("gemini_api_key", key);
+      };
+
+      const analyzeWithAI = async () => {
+        if (!input.trim()) return;
+        if (!apiKey) {
+          setErrorMsg("우측 상단 ⚙️ 버튼을 눌러 발급받으신 Gemini API 키를 등록해 주세요.");
+          return;
+        }
+
+        setLoading(true);
+        setErrorMsg("");
+
+        try {
+          const prompt = `당신은 전문 영양사입니다. 사용자가 입력한 식단 텍스트를 분석하여 포함된 모든 음식을 개별 항목으로 나누고 영양성분을 추정해 주세요.
+선택된 끼니: "${mealChoice}"
+식단 내용: "${input.trim()}"
+
+규칙:
+1. 각 음식별로 양(amount), 칼로리(kcal), 탄수화물(carb, g), 단백질(protein, g), 지방(fat, g)을 계산합니다.
+2. 반환 형식은 오직 유효한 JSON 배열이어야 합니다. 마크다운(\`\`\`json 등)이나 부가 텍스트는 절대 포함하지 마세요.
+
+반환 포맷:
+[
+  {"name": "음식명", "amount": "섭취량(예: 1공기, 150g)", "kcal": 숫자, "carb": 숫자, "protein": 숫자, "fat": 숫자}
+]`;
+
+          const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: { responseMimeType: "application/json" },
+              }),
+            }
+          );
+
+          const data = await res.json();
+          if (data.error) throw new Error(data.error.message || "API 요청 오류");
+
+          const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+          const parsedItems = JSON.parse(responseText.trim());
+
+          if (Array.isArray(parsedItems) && parsedItems.length > 0) {
+            const newItems = parsedItems.map((it, idx) => ({
+              id: Date.now() + idx,
+              mealType: mealChoice,
+              name: it.name,
+              amount: it.amount || "1인분",
+              kcal: Number(it.kcal) || 0,
+              carb: Number(it.carb) || 0,
+              protein: Number(it.protein) || 0,
+              fat: Number(it.fat) || 0,
+            }));
+
+            saveEntries([...entries, ...newItems]);
+            setInput("");
+          } else {
+            setErrorMsg("음식을 인식하지 못했습니다. 더 구체적으로 적어주세요.");
+          }
+        } catch (err) {
+          setErrorMsg("AI 계산 실패: API 키가 올바른지 확인해 주세요.");
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      const removeEntry = (id) => {
+        saveEntries(entries.filter((e) => e.id !== id));
+      };
+
+      const total = entries.reduce(
+        (acc, cur) => ({
+          kcal: acc.kcal + cur.kcal,
+          carb: acc.carb + cur.carb,
+          protein: acc.protein + cur.protein,
+          fat: acc.fat + cur.fat,
+        }),
+        { kcal: 0, carb: 0, protein: 0, fat: 0 }
+      );
+
+      const remaining = goal - total.kcal;
+      const isToday = date === getTodayStr();
+      const macroGoal = {
+        carb: Math.round((goal * 0.5) / 4),
+        protein: Math.round((goal * 0.25) / 4),
+        fat: Math.round((goal * 0.25) / 9),
+      };
+
+      const filteredEntries = viewMeal === "전체" 
+        ? entries 
+        : entries.filter((e) => e.mealType === viewMeal);
+
+      return (
+        <main className="min-h-screen bg-[#F0F6FC] text-[#1E293B] font-sans pb-28">
+          <div className="max-w-[480px] mx-auto px-5 pt-8">
+            
+            <header className="flex justify-between items-center mb-1">
+              <div className="flex items-center gap-2">
+                <span className="w-7 h-7 rounded-full bg-[#3B82F6] text-white flex items-center justify-center text-xs font-bold shadow-sm">
+                  한
+                </span>
+                <span className="text-[#3B82F6] font-bold text-sm">식단 기록</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowKeyInput(!showKeyInput)}
+                  className="text-xs bg-white text-[#64748B] border border-[#E2E8F0] px-2.5 py-1 rounded-full shadow-sm"
+                >
+                  {apiKey ? "🔑 AI 연동됨" : "⚙️ API 키 등록"}
+                </button>
+                <div className="flex gap-1">
+                  <button
+                    onClick={() => {
+                      const [y, m, d] = date.split("-").map(Number);
+                      const prev = new Date(y, m - 1, d - 1);
+                      setDate(prev.toISOString().split("T")[0]);
+                    }}
+                    className="w-8 h-8 rounded-full bg-white text-[#64748B] flex items-center justify-center text-sm shadow-sm border border-[#E2E8F0]"
+                  >
+                    ‹
+                  </button>
+                  <button
+                    onClick={() => {
+                      const [y, m, d] = date.split("-").map(Number);
+                      const next = new Date(y, m - 1, d + 1);
+                      setDate(next.toISOString().split("T")[0]);
+                    }}
+                    className="w-8 h-8 rounded-full bg-white text-[#64748B] flex items-center justify-center text-sm shadow-sm border border-[#E2E8F0]"
+                  >
+                    ›
+                  </button>
+                </div>
+              </div>
+            </header>
+
+            {showKeyInput && (
+              <div className="bg-white rounded-2xl p-4 mb-4 border border-[#E2E8F0] shadow-sm">
+                <p className="text-xs text-[#64748B] mb-2 font-medium">
+                  발급받으신 Gemini API 키를 입력해 주세요. (이 브라우저에만 안전하게 저장됩니다)
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    type="password"
+                    value={apiKey}
+                    onChange={(e) => handleKeySave(e.target.value)}
+                    placeholder="API 키 입력"
+                    className="flex-1 bg-[#F8FAFC] border border-[#CBD5E1] rounded-xl px-3 py-1.5 text-xs outline-none focus:border-[#3B82F6]"
+                  />
+                  <button
+                    onClick={() => setShowKeyInput(false)}
+                    className="bg-[#3B82F6] text-white px-3 py-1.5 rounded-xl text-xs font-bold"
+                  >
+                    완료
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="flex items-center gap-2 mb-5">
+              <h1 className="text-2xl font-bold tracking-tight text-[#0F172A]">
+                {formatDateLabel(date)}
+              </h1>
+              {isToday && (
+                <span className="bg-[#E0F2FE] text-[#0284C7] text-[11px] font-bold px-2 py-0.5 rounded-full">
+                  오늘
+                </span>
+              )}
+            </div>
+
+            <section className="bg-white rounded-3xl p-6 shadow-[0_8px_30px_rgb(0,0,0,0.04)] mb-4 border border-[#EDF2F7]">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="font-bold text-[#1E293B] text-base">오늘의 영양성분</h2>
+                <button
+                  onClick={() => setEditingGoal(!editingGoal)}
+                  className="bg-[#EFF6FF] text-[#2563EB] text-xs font-semibold px-3 py-1.5 rounded-full"
+                >
+                  목표 {goal.toLocaleString()} kcal 수정
+                </button>
+              </div>
+
+              {editingGoal && (
+                <div className="flex gap-2 mb-4 bg-[#F8FAFC] p-3 rounded-2xl border border-[#E2E8F0]">
+                  <input
+                    type="number"
+                    value={goalDraft}
+                    onChange={(e) => setGoalDraft(e.target.value)}
+                    className="w-full bg-white border border-[#CBD5E1] rounded-xl px-3 py-1.5 text-sm outline-none focus:border-[#3B82F6]"
+                  />
+                  <button
+                    onClick={handleGoalSave}
+                    className="bg-[#3B82F6] text-white px-4 py-1.5 rounded-xl text-xs font-bold"
+                  >
+                    저장
+                  </button>
+                </div>
+              )}
+
+              <div className="flex justify-between items-end mb-3">
+                <div>
+                  <span className="text-5xl font-black tracking-tight text-[#0F172A]">
+                    {total.kcal.toLocaleString()}
+                  </span>
+                  <span className="text-[#64748B] text-sm ml-1 font-semibold">kcal</span>
+                </div>
+                <div className="text-right">
+                  <span className="text-xs text-[#94A3B8] block font-medium">남은 칼로리</span>
+                  <span className={`text-2xl font-black ${remaining < 0 ? "text-[#EF4444]" : "text-[#2563EB]"}`}>
+                    {remaining.toLocaleString()}
+                  </span>
+                </div>
+              </div>
+
+              <div className="w-full h-2.5 bg-[#EDF2F7] rounded-full overflow-hidden mb-5">
+                <div
+                  className={`h-full transition-all duration-500 rounded-full ${
+                    remaining < 0 ? "bg-[#EF4444]" : "bg-[#3B82F6]"
+                  }`}
+                  style={{ width: `${Math.min(100, (total.kcal / goal) * 100)}%` }}
+                />
+              </div>
+
+              <div className="space-y-3.5 pt-2 border-t border-[#F1F5F9]">
+                {[
+                  { label: "탄수화물", current: total.carb, target: macroGoal.carb },
+                  { label: "단백질", current: total.protein, target: macroGoal.protein },
+                  { label: "지방", current: total.fat, target: macroGoal.fat },
+                ].map((macro) => (
+                  <div key={macro.label} className="text-sm">
+                    <div className="flex justify-between font-medium mb-1">
+                      <span className="text-[#475569]">{macro.label}</span>
+                      <span>
+                        <strong className="font-bold text-[#0F172A]">{macro.current}g</strong>
+                        <span className="text-[#94A3B8] text-xs"> / {macro.target}g</span>
+                      </span>
+                    </div>
+                    <div className="w-full h-1.5 bg-[#F1F5F9] rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-[#3B82F6] rounded-full transition-all duration-300"
+                        style={{ width: `${Math.min(100, (macro.current / macro.target) * 100)}%` }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section className="bg-white rounded-3xl p-6 shadow-[0_8px_30px_rgb(0,0,0,0.04)] mb-4 border border-[#EDF2F7]">
+              <div className="flex justify-between items-center mb-1">
+                <span className="text-[11px] font-extrabold tracking-wider text-[#3B82F6] uppercase">
+                  QUICK LOG
+                </span>
+                <span className="text-[#3B82F6] text-sm">✨</span>
+              </div>
+              <h3 className="text-lg font-bold text-[#0F172A] mb-4">
+                먹은 것을 편하게 적어주세요
+              </h3>
+
+              <div className="grid grid-cols-4 gap-2 mb-3">
+                {MEAL_TYPES.map((type) => {
+                  const isSelected = mealChoice === type;
+                  return (
+                    <button
+                      key={type}
+                      onClick={() => setMealChoice(type)}
+                      className={`py-2 rounded-full text-xs font-bold transition flex items-center justify-center gap-1 shadow-sm ${
+                        isSelected
+                          ? "bg-[#3B82F6] text-white"
+                          : "bg-[#F0F7FF] text-[#3B82F6] hover:bg-[#E2F0FE]"
+                      }`}
+                    >
+                      <span>{MEAL_EMOJI[type]}</span>
+                      {type}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="border border-[#CBD5E1] rounded-2xl p-3 bg-white focus-within:border-[#3B82F6] transition mb-3">
+                <textarea
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  placeholder="예) 김치찌개랑 밥 반 공기, 계란말이 2개 먹었어"
+                  className="w-full text-sm outline-none resize-none h-20 text-[#1E293B] placeholder-[#94A3B8]"
+                />
+              </div>
+
+              {errorMsg && (
+                <div className="text-xs text-[#EF4444] font-medium mb-3">
+                  ⚠️ {errorMsg}
+                </div>
+              )}
+
+              <button
+                onClick={analyzeWithAI}
+                disabled={loading || !input.trim()}
+                className="w-full bg-[#3B82F6] hover:bg-[#2563EB] disabled:bg-[#CBD5E1] text-white font-bold py-3.5 rounded-2xl text-sm transition shadow-[0_4px_14px_rgba(59,130,246,0.3)]"
+              >
+                {loading ? "AI 영양사 분석 중..." : "✦ AI로 자동 계산해서 기록하기"}
+              </button>
+            </section>
+
+            {filteredEntries.length > 0 && (
+              <section className="bg-white rounded-3xl p-5 shadow-[0_8px_30px_rgb(0,0,0,0.04)] mb-4 border border-[#EDF2F7]">
+                <h4 className="font-bold text-sm text-[#0F172A] mb-3">
+                  {viewMeal} 식단 ({filteredEntries.length})
+                </h4>
+                <div className="divide-y divide-[#F1F5F9]">
+                  {filteredEntries.map((item) => (
+                    <div key={item.id} className="py-2.5 flex justify-between items-center">
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs bg-[#F0F7FF] text-[#2563EB] px-2 py-0.5 rounded-md font-bold">
+                            {item.mealType}
+                          </span>
+                          <span className="text-sm font-semibold text-[#1E293B]">{item.name}</span>
+                          <span className="text-xs text-[#64748B]">({item.amount})</span>
+                        </div>
+                        <p className="text-[11px] text-[#94A3B8] mt-0.5">
+                          탄 {item.carb}g · 단 {item.protein}g · 지 {item.fat}g
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="text-sm font-bold text-[#0F172A]">
+                          {item.kcal} <span className="text-[11px] font-normal text-[#64748B]">kcal</span>
+                        </span>
+                        <button
+                          onClick={() => removeEntry(item.id)}
+                          className="text-[#94A3B8] hover:text-[#EF4444] text-sm p-1"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+          </div>
+
+          <nav className="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-md border-t border-[#EDF2F7] py-3 z-50">
+            <div className="max-w-[480px] mx-auto px-6 flex justify-between items-center">
+              {["전체", ...MEAL_TYPES].map((type) => {
+                const isActive = viewMeal === type;
+                return (
+                  <button
+                    key={type}
+                    onClick={() => setViewMeal(type)}
+                    className="flex flex-col items-center gap-1"
+                  >
+                    <div
+                      className={`w-12 h-12 rounded-full flex items-center justify-center text-lg transition shadow-sm ${
+                        isActive
+                          ? "bg-[#EFF6FF] ring-2 ring-[#3B82F6]"
+                          : "bg-[#F8FAFC]"
+                      }`}
+                    >
+                      {MEAL_EMOJI[type]}
+                    </div>
+                    <span className={`text-[11px] font-bold ${isActive ? "text-[#2563EB]" : "text-[#94A3B8]"}`}>
+                      {type}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </nav>
+        </main>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<DietApp />);
+  </script>
+</body>
+</html>
