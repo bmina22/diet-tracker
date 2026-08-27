@@ -85,13 +85,15 @@
       };
 
       const handleKeySave = (key) => {
-        setApiKey(key);
-        localStorage.setItem("gemini_api_key", key);
+        const trimmed = key.trim();
+        setApiKey(trimmed);
+        localStorage.setItem("gemini_api_key", trimmed);
       };
 
       const analyzeWithAI = async () => {
         if (!input.trim()) return;
-        if (!apiKey) {
+        const currentKey = apiKey.trim();
+        if (!currentKey) {
           setErrorMsg("우측 상단 ⚙️ 버튼을 눌러 발급받으신 Gemini API 키를 등록해 주세요.");
           return;
         }
@@ -106,21 +108,19 @@
 
 규칙:
 1. 각 음식별로 양(amount), 칼로리(kcal), 탄수화물(carb, g), 단백질(protein, g), 지방(fat, g)을 계산합니다.
-2. 반환 형식은 오직 유효한 JSON 배열이어야 합니다. 마크다운(\`\`\`json 등)이나 부가 텍스트는 절대 포함하지 마세요.
+2. 반환 형식은 오직 순수 JSON 배열 문자열이어야 합니다. 코드블록(\`\`\`json)이나 부가 텍스트는 절대 붙이지 마세요.
 
-반환 포맷:
-[
-  {"name": "음식명", "amount": "섭취량(예: 1공기, 150g)", "kcal": 숫자, "carb": 숫자, "protein": 숫자, "fat": 숫자}
-]`;
+예시 포맷:
+[{"name": "음식명", "amount": "섭취량(예: 1개, 150g)", "kcal": 150, "carb": 20, "protein": 10, "fat": 5}]`;
 
+          // gemini-2.5-flash / gemini-1.5-flash 호환 엔드포인트
           const res = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${currentKey}`,
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 contents: [{ parts: [{ text: prompt }] }],
-                generationConfig: { responseMimeType: "application/json" },
               }),
             }
           );
@@ -128,8 +128,10 @@
           const data = await res.json();
           if (data.error) throw new Error(data.error.message || "API 요청 오류");
 
-          const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-          const parsedItems = JSON.parse(responseText.trim());
+          let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+          rawText = rawText.replace(/```json/g, "").replace(/```/g, "").trim();
+
+          const parsedItems = JSON.parse(rawText);
 
           if (Array.isArray(parsedItems) && parsedItems.length > 0) {
             const newItems = parsedItems.map((it, idx) => ({
@@ -146,10 +148,10 @@
             saveEntries([...entries, ...newItems]);
             setInput("");
           } else {
-            setErrorMsg("음식을 인식하지 못했습니다. 더 구체적으로 적어주세요.");
+            setErrorMsg("음식을 인식하지 못했습니다. 메뉴와 양을 명확하게 적어주세요.");
           }
         } catch (err) {
-          setErrorMsg("AI 계산 실패: API 키가 올바른지 확인해 주세요.");
+          setErrorMsg(`오류 발생: ${err.message || "API 키를 확인해 주세요."}`);
         } finally {
           setLoading(false);
         }
@@ -227,7 +229,7 @@
             {showKeyInput && (
               <div className="bg-white rounded-2xl p-4 mb-4 border border-[#E2E8F0] shadow-sm">
                 <p className="text-xs text-[#64748B] mb-2 font-medium">
-                  발급받으신 Gemini API 키를 입력해 주세요. (이 브라우저에만 안전하게 저장됩니다)
+                  발급받으신 API 키를 입력해 주세요. (브라우저에만 안전하게 보관됩니다)
                 </p>
                 <div className="flex gap-2">
                   <input
